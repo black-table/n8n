@@ -62,16 +62,16 @@ jobs:
       - name: Debug built CLI files
         run: |
           echo "Listing built CLI files:"
-          find packages/@n8n/cli -type f | grep -E '\.(js|json)$' || echo "No .js/.json files found in CLI"
-
+          find packages/cli -type f | grep -E '\.(js|json)$' || echo "No .js/.json files found in CLI"
+    
       - name: Switch to build branch and commit build artifacts
         run: |
           git checkout -B build/main
       
-          git add -f packages/@n8n/cli
-          git add -f packages/@n8n/db/dist
-          git add -f packages/@n8n/di/dist
-          git add -f packages/@n8n/task-runner/dist
+          git add -f packages/cli
+          git add -f packages/db/dist
+          git add -f packages/di/dist
+          git add -f packages/task-runner/dist
           git add -f packages/nodes-base/dist
           git add -f packages/frontend/**/dist
       
