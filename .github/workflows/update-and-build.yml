@@ -59,11 +59,18 @@ jobs:
       - name: Build all packages
         run: NODE_OPTIONS="--max-old-space-size=4096" pnpm run build
 
-      - name: Switch to build branch
+      - name: Switch to build branch and commit build artifacts
         run: |
           git checkout -B build/main
+      
+          # Add built packages explicitly
+          git add -f packages/@n8n/cli/dist
+          git add -f packages/@n8n/db/dist
+          git add -f packages/@n8n/di/dist
+          git add -f packages/@n8n/task-runner/dist
           git add -f packages/nodes-base/dist
-          git add -f packages/**/dist
+          git add -f packages/frontend/**/dist
+      
           git commit -m "Build from tag ${{ steps.get_tag.outputs.tag }}" || echo "No changes to commit"
           git push origin build/main --force
 
