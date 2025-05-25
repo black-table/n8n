@@ -69,9 +69,9 @@ jobs:
           git checkout -B build/main
       
           git add -f packages/cli
-          git add -f packages/db/dist
-          git add -f packages/di/dist
-          git add -f packages/task-runner/dist
+          git add -f packages/@n8n/db/dist
+          git add -f packages/@n8n/di/dist
+          git add -f packages/@n8n/task-runner/dist
           git add -f packages/nodes-base/dist
           git add -f packages/frontend/**/dist
       
