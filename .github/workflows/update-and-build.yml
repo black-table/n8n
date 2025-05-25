@@ -39,11 +39,19 @@ jobs:
           git merge --no-edit "tags/${{ steps.get_tag.outputs.tag }}" || echo "Already up to date"
           git push origin stable-release
 
-      - name: Install pnpm@10.2.1 via corepack
+      - name: Enable pnpm 10.2.1 via corepack
         run: |
           corepack enable
           corepack prepare pnpm@10.2.1 --activate
           pnpm -v
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store/v3
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -58,3 +66,9 @@ jobs:
           git add -f packages/**/dist
           git commit -m "Build from tag ${{ steps.get_tag.outputs.tag }}" || echo "No changes to commit"
           git push origin build/main --force
+
+      - name: Tag build/main with version
+        run: |
+          VERSION_TAG="n8n-${{ steps.get_tag.outputs.tag }}"
+          git tag -f "$VERSION_TAG"
+          git push origin "$VERSION_TAG" --force
