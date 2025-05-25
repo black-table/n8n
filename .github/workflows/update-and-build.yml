@@ -39,17 +39,15 @@ jobs:
           git merge --no-edit "tags/${{ steps.get_tag.outputs.tag }}" || echo "Already up to date"
           git push origin stable-release
 
-      - name: Install and verify pnpm globally
+      - name: Install pnpm@10.2.1 via corepack
         run: |
-          npm install -g pnpm@8
-          pnpm -v # Verify the installation and version
-       
-      - name: Install pnpm and dependencies
-        uses: pnpm/action-setup@v2
-        with:
-          version: 8
-      - run: corepack enable && pnpm install --frozen-lockfile
-      
+          corepack enable
+          corepack prepare pnpm@10.2.1 --activate
+          pnpm -v
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Build all packages
         run: NODE_OPTIONS="--max-old-space-size=4096" pnpm run build
 
