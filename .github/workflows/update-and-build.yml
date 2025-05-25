@@ -1,0 +1,57 @@
+name: Update and Build n8n Fork
+
+on:
+  schedule:
+    - cron: '0 5 * * *'  # daily at 5am UTC
+  workflow_dispatch:
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout your fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Git
+        run: |
+          git config --global user.email "ci@blacktablemedia.com"
+          git config --global user.name "BTM Bot"
+
+      - name: Add upstream n8n repo
+        run: git remote add upstream https://github.com/n8n-io/n8n.git || true
+
+      - name: Fetch upstream and tags
+        run: git fetch upstream --tags
+
+      - name: Find latest upstream tag
+        id: get_tag
+        run: |
+          LATEST_TAG=$(git tag -l 'v*' | sort -V | tail -n1)
+          echo "Latest tag is: $LATEST_TAG"
+          echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Checkout and update stable-release
+        run: |
+          git checkout stable-release
+          git merge --no-edit "tags/${{ steps.get_tag.outputs.tag }}" || echo "Already up to date"
+          git push origin stable-release
+
+      - name: Install pnpm and deps
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - run: corepack enable && pnpm install --frozen-lockfile
+
+      - name: Build all packages
+        run: NODE_OPTIONS="--max-old-space-size=4096" pnpm run build
+
+      - name: Switch to build branch
+        run: |
+          git checkout -B build/main
+          git add -f packages/nodes-base/dist
+          git add -f packages/**/dist
+          git commit -m "Build from tag ${{ steps.get_tag.outputs.tag }}" || echo "No changes to commit"
+          git push origin build/main --force
