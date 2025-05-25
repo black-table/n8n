@@ -39,6 +39,9 @@ jobs:
           git merge --no-edit "tags/${{ steps.get_tag.outputs.tag }}" || echo "Already up to date"
           git push origin stable-release
 
+      - name: Install pnpm globally
+        run: npm install -g pnpm@8
+      
       - name: Install pnpm and deps
         uses: pnpm/action-setup@v2
         with:
