@@ -1,0 +1,32 @@
+import type { EntityManager, SelectQueryBuilder } from '@n8n/typeorm';
+import { DataSource, Repository } from '@n8n/typeorm';
+import { Folder } from '../entities';
+import type { FolderWithWorkflowAndSubFolderCount, ListQuery } from '../entities/types-db';
+export declare class FolderRepository extends Repository<FolderWithWorkflowAndSubFolderCount> {
+    constructor(dataSource: DataSource);
+    getManyAndCount(options?: ListQuery.Options): Promise<[FolderWithWorkflowAndSubFolderCount[], number]>;
+    getMany(options?: ListQuery.Options): Promise<FolderWithWorkflowAndSubFolderCount[]>;
+    getManyQuery(options?: ListQuery.Options): SelectQueryBuilder<FolderWithWorkflowAndSubFolderCount>;
+    private applySelections;
+    private applyWorkflowCountSelect;
+    private applyDefaultSelect;
+    private applyCustomSelect;
+    private addBasicFields;
+    private addRelationFields;
+    private getProjectFields;
+    private getTagFields;
+    private getParentFolderFields;
+    private applyFilters;
+    private applyBasicFilters;
+    private applyTagsFilter;
+    private createTagsSubQuery;
+    private applySorting;
+    private parseSortingParams;
+    private applySortingByField;
+    private applyPagination;
+    findOneOrFailFolderInProject(folderId: string, projectId: string, em?: EntityManager): Promise<Folder>;
+    moveAllToFolder(fromFolderId: string, toFolderId: string, tx: EntityManager): Promise<void>;
+    transferAllFoldersToProject(fromProjectId: string, toProjectId: string, tx?: EntityManager): Promise<import("@n8n/typeorm").UpdateResult>;
+    private applyExcludeFolderFilter;
+    getAllFolderIdsInHierarchy(parentFolderId: string, projectId?: string): Promise<string[]>;
+}
