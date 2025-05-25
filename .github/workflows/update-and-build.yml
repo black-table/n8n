@@ -59,12 +59,16 @@ jobs:
       - name: Build all packages
         run: NODE_OPTIONS="--max-old-space-size=4096" pnpm run build
 
+      - name: Debug built CLI files
+        run: |
+          echo "Listing built CLI files:"
+          find packages/@n8n/cli -type f | grep -E '\.(js|json)$' || echo "No .js/.json files found in CLI"
+
       - name: Switch to build branch and commit build artifacts
         run: |
           git checkout -B build/main
       
-          # Add built packages explicitly
-          git add -f packages/@n8n/cli/dist
+          git add -f packages/@n8n/cli
           git add -f packages/@n8n/db/dist
           git add -f packages/@n8n/di/dist
           git add -f packages/@n8n/task-runner/dist
