@@ -1,31 +1,16 @@
 import type { CommunityNodeType } from '@n8n/api-types';
+import { Logger, inProduction } from '@n8n/backend-common';
 import { GlobalConfig } from '@n8n/config';
 import { Service } from '@n8n/di';
-import { Logger } from 'n8n-core';
-import { ensureError, type INodeTypeDescription } from 'n8n-workflow';
+import { ensureError } from 'n8n-workflow';
 
 import { CommunityPackagesService } from './community-packages.service';
-import { getCommunityNodeTypes } from '../utils/community-node-types-utils';
+import {
+	getCommunityNodeTypes,
+	StrapiCommunityNodeType,
+} from '../utils/community-node-types-utils';
 
 const UPDATE_INTERVAL = 8 * 60 * 60 * 1000;
-
-export type StrapiCommunityNodeType = {
-	authorGithubUrl: string;
-	authorName: string;
-	checksum: string;
-	description: string;
-	displayName: string;
-	name: string;
-	numberOfStars: number;
-	numberOfDownloads: number;
-	packageName: string;
-	createdAt: string;
-	updatedAt: string;
-	npmVersion: string;
-	isOfficialNode: boolean;
-	companyName?: string;
-	nodeDescription: INodeTypeDescription;
-};
 
 @Service()
 export class CommunityNodeTypesService {
@@ -46,7 +31,9 @@ export class CommunityNodeTypesService {
 				this.globalConfig.nodes.communityPackages.enabled &&
 				this.globalConfig.nodes.communityPackages.verifiedEnabled
 			) {
-				const environment = this.globalConfig.license.tenantId === 1 ? 'production' : 'staging';
+				// Cloud sets ENVIRONMENT to 'production' or 'staging' depending on the environment
+				const environment =
+					inProduction || process.env.ENVIRONMENT === 'production' ? 'production' : 'staging';
 				data = await getCommunityNodeTypes(environment);
 			}
 
