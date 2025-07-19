@@ -48,6 +48,11 @@ jobs:
           node-version: '22.x'
           cache-suffix: 'workflow-test'
 
+      - name: Install Python dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y python3-setuptools python3-dev build-essential
+
       - name: Install OS dependencies
         run: |
           sudo apt update -y

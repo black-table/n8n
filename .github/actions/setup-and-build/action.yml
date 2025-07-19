@@ -29,6 +29,12 @@ runs:
         node-version: ${{ inputs.node-version }}
         cache: pnpm
 
+    - name: Install Python dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y python3-setuptools python3-dev build-essential
+      shell: bash
+
     - name: Install dependencies
       run: pnpm install --frozen-lockfile
       shell: bash

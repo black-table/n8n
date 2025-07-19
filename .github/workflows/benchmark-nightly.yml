@@ -44,6 +44,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
 
+      - name: Install Python dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y python3-setuptools python3-dev build-essential
+
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: '1.8.5'
