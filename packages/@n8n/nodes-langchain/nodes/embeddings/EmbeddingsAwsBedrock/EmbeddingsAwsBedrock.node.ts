@@ -1,4 +1,11 @@
+import type { BedrockRuntimeClientConfig } from '@aws-sdk/client-bedrock-runtime';
+import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { BedrockEmbeddings } from '@langchain/aws';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
+import { getNodeProxyAgent, logWrapper, getConnectionHintNoticeField } from '@n8n/ai-utilities';
+import { getAwsDomain } from 'n8n-nodes-base/aws-credentials';
+import { awsNodeAuthOptions, awsNodeCredentials } from 'n8n-nodes-base/dist/nodes/Aws/utils';
+
 import {
 	NodeConnectionTypes,
 	type INodeType,
@@ -7,20 +14,14 @@ import {
 	type SupplyData,
 } from 'n8n-workflow';
 
-import { logWrapper } from '@utils/logWrapper';
-import { getConnectionHintNoticeField } from '@utils/sharedFields';
+import { resolveAwsCredentials } from '@utils/aws/resolveAwsCredentials';
 
 export class EmbeddingsAwsBedrock implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Embeddings AWS Bedrock',
 		name: 'embeddingsAwsBedrock',
 		icon: 'file:bedrock.svg',
-		credentials: [
-			{
-				name: 'aws',
-				required: true,
-			},
-		],
+		credentials: awsNodeCredentials,
 		group: ['transform'],
 		version: 1,
 		description: 'Use Embeddings AWS Bedrock',
@@ -51,11 +52,13 @@ export class EmbeddingsAwsBedrock implements INodeType {
 			baseURL: '=https://bedrock.{{$credentials?.region ?? "eu-central-1"}}.amazonaws.com',
 		},
 		properties: [
+			awsNodeAuthOptions,
 			getConnectionHintNoticeField([NodeConnectionTypes.AiVectorStore]),
 			{
 				displayName: 'Model',
 				name: 'model',
 				type: 'options',
+				allowArbitraryValues: true, // Hide issues when model name is specified in the expression and does not match any of the options
 				description:
 					'The model which will generate the completion. <a href="https://docs.aws.amazon.com/bedrock/latest/userguide/foundation-models.html">Learn more</a>.',
 				typeOptions: {
@@ -104,18 +107,30 @@ export class EmbeddingsAwsBedrock implements INodeType {
 	};
 
 	async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
-		const credentials = await this.getCredentials('aws');
+		const { region, credentials } = await resolveAwsCredentials(this, itemIndex);
 		const modelName = this.getNodeParameter('model', itemIndex) as string;
 
+		// getAwsDomain keeps China (amazonaws.com.cn) / GovCloud endpoints correct.
+		const bedrockEndpoint = `https://bedrock-runtime.${region}.${getAwsDomain(region)}`;
+		const proxyAgent = getNodeProxyAgent(bedrockEndpoint);
+
+		const clientConfig: BedrockRuntimeClientConfig = {
+			region,
+			credentials,
+		};
+		if (proxyAgent) {
+			clientConfig.requestHandler = new NodeHttpHandler({
+				httpAgent: proxyAgent,
+				httpsAgent: proxyAgent,
+			});
+		}
+
+		const client = new BedrockRuntimeClient(clientConfig);
 		const embeddings = new BedrockEmbeddings({
-			region: credentials.region as string,
+			client,
 			model: modelName,
 			maxRetries: 3,
-			credentials: {
-				secretAccessKey: credentials.secretAccessKey as string,
-				accessKeyId: credentials.accessKeyId as string,
-				sessionToken: credentials.sessionToken as string,
-			},
+			region,
 		});
 
 		return {

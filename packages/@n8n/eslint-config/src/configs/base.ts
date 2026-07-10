@@ -17,8 +17,6 @@ export const baseConfig = tseslint.config(
 		'dist/**',
 		'eslint.config.mjs',
 		'tsup.config.ts',
-		'jest.config.js',
-		'cypress.config.js',
 		'vite.config.ts',
 		'vitest.config.ts',
 	]),
@@ -160,6 +158,8 @@ export const baseConfig = tseslint.config(
 			 * https://github.com/typescript-eslint/typescript-eslint/blob/master/packages/eslint-plugin/docs/rules/consistent-type-imports.md
 			 */
 			'@typescript-eslint/consistent-type-imports': 'error',
+
+			'@typescript-eslint/consistent-type-exports': 'error',
 
 			/**
 			 * https://github.com/typescript-eslint/typescript-eslint/blob/master/packages/eslint-plugin/docs/rules/member-delimiter-style.md
@@ -333,6 +333,27 @@ export const baseConfig = tseslint.config(
 			'import-x/no-named-as-default-member': 'off',
 			'import-x/no-unresolved': 'off',
 
+			'import-x/no-extraneous-dependencies': [
+				'error',
+				{
+					devDependencies: [
+						'**/test/**',
+						'**/__tests__/**',
+						'**/*.test.ts',
+						'**/*.test.utils.ts',
+						'**/*.spec.ts',
+						'**/integration-tests/**',
+						'**/test-utils/**',
+						'**/*.config.ts',
+						'**/*.config.js',
+						'**/scripts/*.ts',
+						'**/scripts/*.js',
+						'**/*.stories.ts',
+					],
+					optionalDependencies: false,
+				},
+			],
+
 			// ******************************************************************
 			//                    overrides to base ruleset
 			// ******************************************************************
@@ -369,7 +390,7 @@ export const baseConfig = tseslint.config(
 			/**
 			 * https://eslint.org/docs/rules/prefer-spread
 			 */
-			'prefer-spread': 'error',
+			'prefer-spread': 'off',
 
 			// These are tuned off since we use `noUnusedLocals` and `noUnusedParameters` now
 			'no-unused-vars': 'off',
@@ -413,6 +434,7 @@ export const baseConfig = tseslint.config(
 			'n8n-local-rules/no-plain-errors': 'off',
 			'@typescript-eslint/unbound-method': 'off',
 			'n8n-local-rules/no-skipped-tests': process.env.NODE_ENV === 'development' ? 'warn' : 'error',
+			'n8n-local-rules/no-error-instance-in-to-throw': 'error',
 		},
 	},
 );

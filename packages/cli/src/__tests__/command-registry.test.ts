@@ -1,14 +1,18 @@
 import type { Logger, ModuleRegistry } from '@n8n/backend-common';
+import { CliParser } from '@n8n/backend-common';
 import { CommandMetadata } from '@n8n/decorators';
 import { Container } from '@n8n/di';
-import { mock } from 'jest-mock-extended';
+import type { Mock, MockInstance } from 'vitest';
+import { mock } from 'vitest-mock-extended';
 import { z } from 'zod';
 
 import { CommandRegistry } from '../command-registry';
 
-jest.mock('fast-glob');
+vi.mock('fast-glob');
+vi.mock('node:fs/promises', () => ({ access: vi.fn() }));
 
 import glob from 'fast-glob';
+import { access } from 'node:fs/promises';
 
 describe('CommandRegistry', () => {
 	let commandRegistry: CommandRegistry;
@@ -16,27 +20,31 @@ describe('CommandRegistry', () => {
 	const moduleRegistry = mock<ModuleRegistry>();
 	const logger = mock<Logger>();
 	let originalProcessArgv: string[];
-	let mockProcessExit: jest.SpyInstance;
+	let mockProcessExit: MockInstance;
+	const cliParser = new CliParser(logger);
 
 	class TestCommand {
 		flags: any;
 
-		init = jest.fn();
+		init = vi.fn();
 
-		run = jest.fn();
+		run = vi.fn();
 
-		catch = jest.fn();
+		catch = vi.fn();
 
-		finally = jest.fn();
+		finally = vi.fn();
 	}
 
 	beforeEach(() => {
-		jest.resetAllMocks();
+		vi.resetAllMocks();
 
 		originalProcessArgv = process.argv;
-		mockProcessExit = jest.spyOn(process, 'exit').mockImplementation((() => {}) as any);
+		mockProcessExit = vi.spyOn(process, 'exit').mockImplementation((() => {}) as any);
 
-		(glob as unknown as jest.Mock).mockResolvedValue([]);
+		(glob as unknown as Mock).mockResolvedValue([]);
+		// Default: command file does not exist on disk, so the dynamic import is
+		// skipped and commands come from the metadata registered per-test.
+		(access as unknown as Mock).mockRejectedValue(new Error('ENOENT'));
 
 		commandMetadata = new CommandMetadata();
 		Container.set(CommandMetadata, commandMetadata);
@@ -58,13 +66,13 @@ describe('CommandRegistry', () => {
 	afterEach(() => {
 		process.argv = originalProcessArgv;
 		mockProcessExit.mockRestore();
-		jest.resetAllMocks();
+		vi.resetAllMocks();
 	});
 
 	it('should execute the specified command', async () => {
 		process.argv = ['node', 'n8n', 'test-command'];
 
-		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger);
+		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger, cliParser);
 		await commandRegistry.execute();
 
 		expect(moduleRegistry.loadModules).toHaveBeenCalled();
@@ -81,9 +89,9 @@ describe('CommandRegistry', () => {
 		const error = new Error('Test error');
 		const commandClass = commandMetadata.get('test-command')!.class;
 		const commandInstance = Container.get(commandClass);
-		commandInstance.run = jest.fn().mockRejectedValue(error);
+		commandInstance.run = vi.fn().mockRejectedValue(error);
 
-		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger);
+		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger, cliParser);
 		await commandRegistry.execute();
 
 		expect(commandInstance.catch).toHaveBeenCalledWith(error);
@@ -93,7 +101,7 @@ describe('CommandRegistry', () => {
 	it('should parse and apply command flags', async () => {
 		process.argv = ['node', 'n8n', 'test-command', '--flag1', 'value1', '--flag2', '-s', '123'];
 
-		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger);
+		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger, cliParser);
 		await commandRegistry.execute();
 
 		const commandInstance = Container.get(commandMetadata.get('test-command')!.class);
@@ -107,7 +115,7 @@ describe('CommandRegistry', () => {
 	it('should handle alias flags', async () => {
 		process.argv = ['node', 'n8n', 'test-command', '--flag1', 'value1', '-s', '123'];
 
-		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger);
+		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger, cliParser);
 		await commandRegistry.execute();
 
 		const commandInstance = Container.get(commandMetadata.get('test-command')!.class);
@@ -120,17 +128,29 @@ describe('CommandRegistry', () => {
 	it('should exit with error when command not found', async () => {
 		process.argv = ['node', 'n8n', 'non-existent-command'];
 
-		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger);
+		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger, cliParser);
 		await commandRegistry.execute();
 
 		expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('not found'));
 		expect(mockProcessExit).toHaveBeenCalledWith(1);
 	});
 
+	it('should surface the error when a command file exists but fails to load', async () => {
+		process.argv = ['node', 'n8n', 'test-command'];
+		// Pretend the command file exists so the dynamic import is attempted; the
+		// import then fails (no such file), standing in for a broken dependency.
+		(access as unknown as Mock).mockResolvedValue(undefined);
+
+		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger, cliParser);
+
+		await expect(commandRegistry.execute()).rejects.toThrow();
+		expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Failed to load'));
+	});
+
 	it('should display help when --help flag is used', async () => {
 		process.argv = ['node', 'n8n', 'test-command', '--help'];
 
-		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger);
+		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger, cliParser);
 		await commandRegistry.execute();
 
 		expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('USAGE'));
@@ -143,7 +163,7 @@ describe('CommandRegistry', () => {
 	it('should list all commands when global help is requested', async () => {
 		process.argv = ['node', 'n8n', '--help'];
 
-		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger);
+		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger, cliParser);
 		await commandRegistry.execute();
 
 		expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Available commands'));
@@ -153,7 +173,7 @@ describe('CommandRegistry', () => {
 	it('should display proper command usage with printCommandUsage', () => {
 		process.argv = ['node', 'n8n', 'test-command'];
 
-		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger);
+		commandRegistry = new CommandRegistry(commandMetadata, moduleRegistry, logger, cliParser);
 		const commandEntry = commandMetadata.get('test-command')!;
 		commandRegistry.printCommandUsage(commandEntry);
 

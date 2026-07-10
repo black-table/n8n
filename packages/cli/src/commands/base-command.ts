@@ -3,6 +3,7 @@ import {
 	inDevelopment,
 	inTest,
 	LicenseState,
+	LockService,
 	Logger,
 	ModuleRegistry,
 	ModulesConfig,
@@ -15,28 +16,35 @@ import {
 	BinaryDataConfig,
 	BinaryDataService,
 	InstanceSettings,
-	ObjectStoreService,
 	DataDeduplicationService,
 	ErrorReporter,
+	ExecutionContextHookRegistry,
+	StorageConfig,
 } from 'n8n-core';
-import { ensureError, sleep, UnexpectedError, UserError } from 'n8n-workflow';
+import { ObjectStoreConfig } from 'n8n-core/dist/binary-data/object-store/object-store.config';
+import { AzureBlobConfig } from 'n8n-core/dist/binary-data/azure-blob/azure-blob.config';
+import { ensureError } from '@n8n/utils/errors/ensure-error';
+import { Expression, sleep, UnexpectedError } from 'n8n-workflow';
 
 import type { AbstractServer } from '@/abstract-server';
-import config from '@/config';
 import { N8N_VERSION, N8N_RELEASE_DATE } from '@/constants';
 import * as CrashJournal from '@/crash-journal';
 import { getDataDeduplicationService } from '@/deduplication';
-import { DeprecationService } from '@/deprecation/deprecation.service';
 import { TestRunCleanupService } from '@/evaluation.ee/test-runner/test-run-cleanup.service.ee';
 import { MessageEventBus } from '@/eventbus/message-event-bus/message-event-bus';
 import { TelemetryEventRelay } from '@/events/relays/telemetry.event-relay';
+import { WorkflowFailureNotificationEventRelay } from '@/events/relays/workflow-failure-notification.event-relay';
+import { ExecutionDataJsonStore } from '@/executions/execution-data/execution-data-json-store';
+import { ExpressionObservabilityProvider } from '@/expression-observability/expression-observability.provider';
 import { ExternalHooks } from '@/external-hooks';
 import { License } from '@/license';
 import { LoadNodesAndCredentials } from '@/load-nodes-and-credentials';
+import { CommunityPackagesConfig } from '@/modules/community-packages/community-packages.config';
 import { NodeTypes } from '@/node-types';
 import { PostHogClient } from '@/posthog';
 import { ShutdownService } from '@/shutdown/shutdown.service';
-import { WorkflowHistoryManager } from '@/workflows/workflow-history.ee/workflow-history-manager.ee';
+import { resolveBackendHealthEndpointPath } from '@/utils/health-endpoint.util';
+import { WorkflowHistoryManager } from '@/workflows/workflow-history/workflow-history-manager';
 
 export abstract class BaseCommand<F = never> {
 	readonly flags: F;
@@ -65,6 +73,8 @@ export abstract class BaseCommand<F = never> {
 
 	protected readonly moduleRegistry = Container.get(ModuleRegistry);
 
+	protected readonly executionContextHookRegistry = Container.get(ExecutionContextHookRegistry);
+
 	/**
 	 * How long to wait for graceful shutdown before force killing the process.
 	 */
@@ -74,14 +84,25 @@ export abstract class BaseCommand<F = never> {
 	/** Whether to init community packages (if enabled) */
 	protected needsCommunityPackages = false;
 
-	/** Whether to init task runner (if enabled). */
+	/** Whether to init task runner. */
 	protected needsTaskRunner = false;
 
 	async init(): Promise<void> {
 		this.dbConnection = Container.get(DbConnection);
 		this.errorReporter = Container.get(ErrorReporter);
 
-		const { backendDsn, environment, deploymentName } = this.globalConfig.sentry;
+		const {
+			backendDsn,
+			environment,
+			deploymentName,
+			profilesSampleRate,
+			tracesSampleRate,
+			tracesSlowSpanThresholdMs,
+			webhookTracesSampleRate,
+			eventLoopBlockThreshold,
+			eventLoopBlockMaxEventsPerHour,
+			eventLoopBlockDetectionEnabled,
+		} = this.globalConfig.sentry;
 		await this.errorReporter.init({
 			serverType: this.instanceSettings.instanceType,
 			dsn: backendDsn,
@@ -89,13 +110,40 @@ export abstract class BaseCommand<F = never> {
 			release: `n8n@${N8N_VERSION}`,
 			serverName: deploymentName,
 			releaseDate: N8N_RELEASE_DATE,
+			withEventLoopBlockDetection: eventLoopBlockDetectionEnabled,
+			eventLoopBlockThreshold,
+			eventLoopBlockMaxEventsPerHour,
+			tracesSampleRate,
+			slowSpanThresholdMs: tracesSlowSpanThresholdMs,
+			webhookEndpoint: this.globalConfig.endpoints.webhook,
+			webhookTracesSampleRate,
+			profilesSampleRate,
+			healthEndpoint: resolveBackendHealthEndpointPath(this.globalConfig),
+			eligibleIntegrations: {
+				Express: true,
+				Http: true,
+				Postgres: this.globalConfig.database.type === 'postgresdb',
+				Redis:
+					this.globalConfig.executions.mode === 'queue' ||
+					this.globalConfig.cache.backend === 'redis',
+			},
 		});
 
 		process.once('SIGTERM', this.onTerminationSignal('SIGTERM'));
 		process.once('SIGINT', this.onTerminationSignal('SIGINT'));
 
 		this.nodeTypes = Container.get(NodeTypes);
+
 		await Container.get(LoadNodesAndCredentials).init();
+
+		const useRedisForLocking =
+			this.globalConfig.executions.mode === 'queue' ||
+			this.globalConfig.multiMainSetup.enabled ||
+			this.globalConfig.cache.backend === 'redis';
+		if (useRedisForLocking) {
+			const { RedisLockService } = await import('@/scaling/redis-lock.service');
+			Container.get(LockService).setProvider(Container.get(RedisLockService));
+		}
 
 		await this.dbConnection
 			.init()
@@ -119,12 +167,10 @@ export abstract class BaseCommand<F = never> {
 					await this.exitWithCrash('There was an error running database migrations', error),
 			);
 
-		Container.get(DeprecationService).warn();
-
 		if (process.env.EXECUTIONS_PROCESS === 'own') process.exit(-1);
 
 		if (
-			config.getEnv('executions.mode') === 'queue' &&
+			this.globalConfig.executions.mode === 'queue' &&
 			this.globalConfig.database.type === 'sqlite'
 		) {
 			this.logger.warn(
@@ -132,15 +178,16 @@ export abstract class BaseCommand<F = never> {
 			);
 		}
 
-		const { communityPackages } = this.globalConfig.nodes;
-		if (communityPackages.enabled && this.needsCommunityPackages) {
-			const { CommunityPackagesService } = await import('@/services/community-packages.service');
-			await Container.get(CommunityPackagesService).init();
-		}
+		// Ensures that when a CLI command has a check for "instanceSettings.isMultiMainEnabled"
+		// that it reflects the configuration of the n8n instance running on the server.
+		const isMultiMainEnabled =
+			this.globalConfig.executions.mode === 'queue' && this.globalConfig.multiMainSetup.enabled;
+		this.instanceSettings.setMultiMainEnabled(isMultiMainEnabled);
+		this.instanceSettings.setMultiMainLicensed(isMultiMainEnabled); // no license check here, as the start command already implements that
 
 		const taskRunnersConfig = this.globalConfig.taskRunners;
 
-		if (this.needsTaskRunner && taskRunnersConfig.enabled) {
+		if (this.needsTaskRunner) {
 			if (taskRunnersConfig.insecureMode) {
 				this.logger.warn(
 					'TASK RUNNER CONFIGURED TO START IN INSECURE MODE. This is discouraged for production use. Please consider using secure mode instead.',
@@ -156,10 +203,34 @@ export abstract class BaseCommand<F = never> {
 
 		await Container.get(PostHogClient).init();
 		await Container.get(TelemetryEventRelay).init();
+		Container.get(WorkflowFailureNotificationEventRelay).init();
+
+		const { engine, poolSize, maxCodeCacheSize, bridgeTimeout, bridgeMemoryLimit, idleTimeout } =
+			this.globalConfig.expressionEngine;
+		await Expression.initExpressionEngine({
+			engine,
+			poolSize,
+			maxCodeCacheSize,
+			bridgeTimeout,
+			bridgeMemoryLimit,
+			idleTimeoutMs: idleTimeout === undefined ? undefined : idleTimeout * 1000,
+			observability: Container.get(ExpressionObservabilityProvider),
+		});
 	}
 
 	protected async stopProcess() {
 		// This needs to be overridden
+	}
+
+	protected async initCommunityPackages() {
+		// @TODO: Move to community-packages module
+		const communityPackagesConfig = Container.get(CommunityPackagesConfig);
+		if (communityPackagesConfig.enabled && this.needsCommunityPackages) {
+			const { CommunityPackagesService } = await import(
+				'@/modules/community-packages/community-packages.service'
+			);
+			await Container.get(CommunityPackagesService).init();
+		}
 	}
 
 	protected async initCrashJournal() {
@@ -168,7 +239,11 @@ export abstract class BaseCommand<F = never> {
 
 	protected async exitSuccessFully() {
 		try {
-			await Promise.all([CrashJournal.cleanup(), this.dbConnection.close()]);
+			await Promise.all([
+				CrashJournal.cleanup(),
+				this.dbConnection.close(),
+				Expression.disposeExpressionEngine(),
+			]);
 		} finally {
 			process.exit();
 		}
@@ -188,47 +263,146 @@ export abstract class BaseCommand<F = never> {
 		throw new UnexpectedError(message);
 	}
 
-	async initObjectStoreService() {
+	async initBinaryDataService() {
 		const binaryDataConfig = Container.get(BinaryDataConfig);
-		const isSelected = binaryDataConfig.mode === 's3';
-		const isAvailable = binaryDataConfig.availableModes.includes('s3');
+		const binaryDataService = Container.get(BinaryDataService);
+		const isS3WriteMode = binaryDataConfig.mode === 's3';
+		const isAzureWriteMode = binaryDataConfig.mode === 'azure';
 
-		if (!isSelected) return;
+		const { DatabaseManager } = await import('@/binary-data/database.manager');
+		binaryDataService.setManager('database', Container.get(DatabaseManager));
 
-		if (isSelected && !isAvailable) {
-			throw new UserError(
-				'External storage selected but unavailable. Please make external storage available by adding "s3" to `N8N_AVAILABLE_BINARY_DATA_MODES`.',
-			);
+		if (isS3WriteMode) {
+			const isLicensed = Container.get(License).isLicensed(LICENSE_FEATURES.BINARY_DATA_S3);
+			if (!isLicensed) {
+				this.logger.error(
+					'S3 binary data storage requires a valid license. Either set `N8N_DEFAULT_BINARY_DATA_MODE` to something else, or upgrade to a license that supports this feature.',
+				);
+				process.exit(1);
+			}
 		}
 
-		const isLicensed = Container.get(License).isLicensed(LICENSE_FEATURES.BINARY_DATA_S3);
-		if (!isLicensed) {
-			this.logger.error(
-				'No license found for S3 storage. \n Either set `N8N_DEFAULT_BINARY_DATA_MODE` to something else, or upgrade to a license that supports this feature.',
-			);
-			return process.exit(1);
+		if (isAzureWriteMode) {
+			const isLicensed = Container.get(LicenseState).isBinaryDataAzureLicensed();
+			if (!isLicensed) {
+				this.logger.error(
+					'Azure Blob binary data storage requires a valid license. Either set `N8N_DEFAULT_BINARY_DATA_MODE` to something else, or upgrade to a license that supports this feature.',
+				);
+				process.exit(1);
+			}
+			if (Container.get(AzureBlobConfig).containerName === '') {
+				this.logger.error(
+					'Azure Blob binary data storage requires `N8N_EXTERNAL_STORAGE_AZURE_CONTAINER_NAME` to be set.',
+				);
+				process.exit(1);
+			}
 		}
 
-		this.logger.debug('License found for external storage - Initializing object store service');
+		const executionDataMode = Container.get(StorageConfig).mode;
+		const isS3Configured = Container.get(ObjectStoreConfig).bucket.name !== '';
+		const isAzureConfigured = Container.get(AzureBlobConfig).containerName !== '';
+		const isExecutionDataS3Mode = executionDataMode === 's3';
+		const isExecutionDataAzureMode = executionDataMode === 'azure';
+		const isExecutionDataS3Licensed = Container.get(LicenseState).isExecutionDataS3Licensed();
+		const isExecutionDataAzureLicensed = Container.get(LicenseState).isExecutionDataAzureLicensed();
+
+		if (isExecutionDataS3Mode) {
+			if (!isExecutionDataS3Licensed) {
+				this.logger.error(
+					'S3 execution data storage requires a valid license. Either set `N8N_EXECUTION_DATA_STORAGE_MODE` to something else, or upgrade to a license that supports this feature.',
+				);
+				process.exit(1);
+			}
+			if (!isS3Configured) {
+				this.logger.error(
+					'S3 execution data storage requires `N8N_EXTERNAL_STORAGE_S3_BUCKET_NAME` to be set.',
+				);
+				process.exit(1);
+			}
+		}
+
+		if (isExecutionDataAzureMode) {
+			if (!isExecutionDataAzureLicensed) {
+				this.logger.error(
+					'Azure Blob execution data storage requires a valid license. Either set `N8N_EXECUTION_DATA_STORAGE_MODE` to something else, or upgrade to a license that supports this feature.',
+				);
+				process.exit(1);
+			}
+			if (!isAzureConfigured) {
+				this.logger.error(
+					'Azure Blob execution data storage requires `N8N_EXTERNAL_STORAGE_AZURE_CONTAINER_NAME` to be set.',
+				);
+				process.exit(1);
+			}
+		}
+
 		try {
-			await Container.get(ObjectStoreService).init();
-			this.logger.debug('Object store init completed');
-		} catch (e) {
-			const error = e instanceof Error ? e : new Error(`${e}`);
-			this.logger.debug('Object store init failed', { error });
+			const objectStoreService = await this.initObjectStoreIfConfigured();
+			if (objectStoreService) {
+				const { ObjectStoreManager } = await import(
+					'n8n-core/dist/binary-data/object-store.manager'
+				);
+				binaryDataService.setManager('s3', new ObjectStoreManager(objectStoreService));
+			}
+		} catch {
+			if (isS3WriteMode || isExecutionDataS3Mode) {
+				this.logger.error('Failed to connect to S3. Please check your S3 configuration.');
+				process.exit(1);
+			}
 		}
+
+		try {
+			const azureBlobService = await this.initAzureStoreIfConfigured();
+			if (azureBlobService) {
+				const { AzureBlobManager } = await import('n8n-core/dist/binary-data/azure-blob.manager');
+				binaryDataService.setManager('azure', new AzureBlobManager(azureBlobService));
+			}
+		} catch {
+			if (isAzureWriteMode || isExecutionDataAzureMode) {
+				this.logger.error(
+					'Failed to connect to Azure Blob storage. Please check your Azure configuration.',
+				);
+				process.exit(1);
+			}
+		}
+
+		await binaryDataService.init();
 	}
 
-	async initBinaryDataService() {
-		try {
-			await this.initObjectStoreService();
-		} catch (e) {
-			const error = e instanceof Error ? e : new Error(`${e}`);
-			this.logger.error(`Failed to init object store: ${error.message}`, { error });
-			process.exit(1);
-		}
+	protected async initObjectStoreIfConfigured() {
+		if (Container.get(ObjectStoreConfig).bucket.name === '') return undefined;
 
-		await Container.get(BinaryDataService).init();
+		const { ObjectStoreService } = await import(
+			'n8n-core/dist/binary-data/object-store/object-store.service.ee'
+		);
+		const objectStoreService = Container.get(ObjectStoreService);
+		await objectStoreService.init();
+
+		const { S3ByteStore } = await import('@/blob-storage/s3-byte-store.ee');
+		Container.get(ExecutionDataJsonStore).registerByteStore(
+			's3',
+			new S3ByteStore(objectStoreService),
+		);
+
+		return objectStoreService;
+	}
+
+	protected async initAzureStoreIfConfigured() {
+		if (Container.get(AzureBlobConfig).containerName === '') return;
+
+		const { AzureBlobService } = await import(
+			'n8n-core/dist/binary-data/azure-blob/azure-blob.service.ee'
+		);
+		const azureBlobService = Container.get(AzureBlobService);
+		await azureBlobService.init();
+
+		const { AzureByteStore } = await import('@/blob-storage/azure-byte-store.ee');
+		Container.get(ExecutionDataJsonStore).registerByteStore(
+			'az',
+			new AzureByteStore(azureBlobService),
+		);
+
+		return azureBlobService;
 	}
 
 	protected async initDataDeduplicationService() {
